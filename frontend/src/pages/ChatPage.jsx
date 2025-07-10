@@ -23,6 +23,9 @@ const ChatPage = () => {
   const [localStream, setLocalStream] = useState(null);
   const [remoteStream, setRemoteStream] = useState(null);
   const [isCaller, setIsCaller] = useState(false);
+  const [activeCall, setActiveCall] = useState(null);
+  const [audioMuted, setAudioMuted] = useState(false);
+  const [videoMuted, setVideoMuted] = useState(false);
 
   useEffect(() => {
     if (!authUser || !targetUserId) return;
@@ -33,11 +36,12 @@ const ChatPage = () => {
 
     // Robust connection event handling
     socket.on("connect", () => {
-      toast.success("Connected to chat server");
+      toast.success("Connected to chat server!");
       // Allow user in room (should be done by admin/creator, here for demo)
       socket.emit("allow-user-in-room", { roomId, userId: authUser._id });
       // Join room
       socket.emit("join-room", { roomId, userId: authUser._id });
+      socket.emit("get-room-users", { roomId });
     });
     socket.on("disconnect", () => {
       toast.error("Disconnected from chat server");
@@ -68,21 +72,18 @@ const ChatPage = () => {
 
 
     // Listen for user-joined and update room users
-    socket.on("user-joined", (userId) => {
-      toast.success(`User joined: ${userId}`);
-      setRoomUsers((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    socket.on("user-joined", () => {
+      toast.success(`User joined`);
+      // We will get the full user list from get-room-users, so we just trigger a fetch
+      socket.emit("get-room-users", { roomId });
     });
 
     // Listen for initial user list (optional, if backend emits it)
     socket.on("room-users", (users) => {
-      setRoomUsers(users);
+      // Filter out the current user to easily get the other user's info
+      const otherUsers = users.filter(u => u.userId !== authUser._id);
+      setRoomUsers(otherUsers);
     });
-
-    // On connect, request current room users (optional, if backend supports)
-    socket.on("connect", () => {
-      socket.emit("get-room-users", { roomId });
-    });
-
     setLoading(false);
 
     return () => {
@@ -110,17 +111,18 @@ const ChatPage = () => {
 
   const initializePeer = useCallback(() => {
     if (peerRef.current) return;  // Only initialize once per session
-    const peer = new Peer();
+    const peer = new Peer(undefined, { config: ICE_SERVERS });
     peerRef.current = peer;
 
     peer.on("open", (id) => {
       console.log("Peer connected with ID:", id);
       // When the peer connection opens, let the server know it's ready for calls.
-      socketRef.current.emit("peer-ready", { roomId, peerId: id });
+      socketRef.current.emit("peer-ready", { roomId, peerId: id, userId: authUser._id });
     });
 
     peer.on("call", (call) => {
       console.log("Received a call:", call);
+      setActiveCall(call);
       navigator.mediaDevices
         .getUserMedia({ video: true, audio: true })
         .then((stream) => {
@@ -137,13 +139,6 @@ const ChatPage = () => {
           console.error("Failed to get user media:", err);
           toast.error("Failed to access camera/microphone.");
         });
-      call.on("close", () => {
-        console.log("Call ended.");
-        setCallActive(false);
-        setLocalStream(null);
-        setRemoteStream(null);
-        setIsCaller(false);
-      });
     });
 
     peer.on("error", (err) => {
@@ -160,41 +155,53 @@ const ChatPage = () => {
         peerRef.current.destroy();
       }
     }
-  }, []);
+  }, [authUser, roomId]);
 
+  const cleanupCall = useCallback(() => {
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+    const localVideo = document.getElementById('localVideo');
+    if (localVideo) localVideo.srcObject = null;
+    const remoteVideo = document.getElementById('remoteVideo');
+    if (remoteVideo) remoteVideo.srcObject = null;
 
+    setCallActive(false);
+    setLocalStream(null);
+    setRemoteStream(null);
+    setIsCaller(false);
+    setAudioMuted(false);
+    setVideoMuted(false);
+    setActiveCall(null);
+    console.log("Call cleaned up.");
+  }, [localStream]);
 
-  useEffect(() => {
-    if (socketRef.current && socketRef.current.connected) {
-      initializePeer();
-      socketRef.current.on("start-call", ({ peerId }) => {
-        handleVideoCall(peerId);
+  const handleHangUp = useCallback(() => {
+    if (activeCall) {
+      activeCall.close();
+    }
+    cleanupCall();
+  }, [activeCall, cleanupCall]);
+
+  const toggleAudioMute = useCallback(() => {
+    if (localStream) {
+      localStream.getAudioTracks().forEach((track) => {
+        track.enabled = !track.enabled;
       });
+      setAudioMuted((prev) => !prev);
     }
-  }, [socketRef, initializePeer]);
+  }, [localStream]);
 
-  useEffect(() => {
-    if (callActive && localStream) {
-        // Display local stream, for example:
-        const videoElement = document.getElementById('localVideo');
-        if (videoElement) {
-          videoElement.srcObject = localStream;
-        }
+  const toggleVideoMute = useCallback(() => {
+    if (localStream) {
+      localStream.getVideoTracks().forEach((track) => {
+        track.enabled = !track.enabled;
+      });
+      setVideoMuted((prev) => !prev);
     }
-  }, [callActive, localStream]);
+  }, [localStream]);
 
-  useEffect(() => {
-    if (callActive && remoteStream) {
-        // Display remote stream
-        const videoElement = document.getElementById('remoteVideo');
-        if (videoElement) {
-          videoElement.srcObject = remoteStream;
-        }
-    }
-  }, [callActive, remoteStream]);
-
-
-  const handleVideoCall = async (peerId) => {
+  const handleVideoCall = useCallback(async (peerId) => {
     if (callActive) {
       toast.error("A call is already in progress.");
       return;
@@ -209,6 +216,7 @@ const ChatPage = () => {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setLocalStream(stream);
       const call = peerRef.current.call(peerId, stream);
+      setActiveCall(call);
       console.log("Initiating call to peer:", peerId);
       setCallActive(true);
       setIsCaller(true);
@@ -220,15 +228,43 @@ const ChatPage = () => {
 
       call.on("close", () => {
         console.log("Call ended.");
-        setCallActive(false);
-        setLocalStream(null);
-        setRemoteStream(null);
+        cleanupCall();
       });
     } catch (err) {
       console.error("Error starting call:", err);
       toast.error("Failed to start video call: " + err.message);
     }
-  };
+  }, [callActive, cleanupCall]);
+
+  useEffect(() => {
+    if (socketRef.current && authUser) {
+      initializePeer();
+
+      const handleIncomingCall = ({ peerId }) => {
+        handleVideoCall(peerId);
+      };
+
+      socketRef.current.on("start-call", handleIncomingCall);
+
+      return () => {
+        socketRef.current?.off("start-call", handleIncomingCall);
+      }
+    }
+  }, [authUser, initializePeer, handleVideoCall]);
+
+  useEffect(() => {
+    if (callActive && localStream) {
+        const videoElement = document.getElementById('localVideo');
+        if (videoElement) videoElement.srcObject = localStream;
+    }
+  }, [callActive, localStream]);
+
+  useEffect(() => {
+    if (callActive && remoteStream) {
+        const videoElement = document.getElementById('remoteVideo');
+        if (videoElement) videoElement.srcObject = remoteStream;
+    }
+  }, [callActive, remoteStream]);
 
   if (loading) return <ChatLoader />;
 
@@ -239,18 +275,32 @@ const ChatPage = () => {
         Users in room: {roomUsers.length > 0 ? roomUsers.length : 1}
       </div>
       {/* Only show CallButton if room is private (2 users) */}
-      {roomUsers.length === 1 && !callActive && (
-        <CallButton handleVideoCall={() => socketRef.current.emit("start-call", { roomId, targetPeerId: peerRef.current.id })} />
+      {!callActive && roomUsers.length === 1 && roomUsers[0].peerId && (
+        <CallButton handleVideoCall={() => socketRef.current.emit("start-call", { roomId, targetPeerId: roomUsers[0].peerId })} />
       )}
       {callActive && (
-        <div className="flex justify-center items-center">
-          <div className="p-4">
-            <video id="localVideo" muted autoPlay className="w-64 h-48 bg-black"></video>
+        <>
+          <div className="flex justify-center items-center">
+            <div className="p-4">
+              <video id="localVideo" muted autoPlay className="w-64 h-48 bg-black"></video>
+            </div>
+            <div className="p-4">
+              <video id="remoteVideo" autoPlay className="w-64 h-48 bg-black"></video>
+            </div>
           </div>
-          <div className="p-4">
-            <video id="remoteVideo" autoPlay className="w-64 h-48 bg-black"></video>
+          <div className="flex justify-center p-2 space-x-2">
+            <button
+              className={`btn ${audioMuted ? "btn-warning" : "btn-neutral"}`}
+              onClick={toggleAudioMute}
+            >
+              {audioMuted ? "Unmute" : "Mute"} Audio
+            </button>
+            <button className={`btn ${videoMuted ? "btn-warning" : "btn-neutral"}`} onClick={toggleVideoMute}>
+              {videoMuted ? "Show" : "Hide"} Video
+            </button>
+            <button className="btn btn-error" onClick={handleHangUp}> Hang Up </button>
           </div>
-        </div>
+        </>
       )}
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
         {messages.map((msg, idx) => (
