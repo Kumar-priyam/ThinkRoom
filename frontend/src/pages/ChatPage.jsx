@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams } from "react-router";
 import useAuthUser from "../hooks/useAuthUser";
 import toast from "react-hot-toast";
@@ -6,7 +6,7 @@ import io from "socket.io-client";
 import ChatLoader from "../components/ChatLoader";
 import CallButton from "../components/CallButton";
 
-
+import Peer from "peerjs";
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
 
 const ChatPage = () => {
@@ -18,6 +18,11 @@ const ChatPage = () => {
   const [roomUsers, setRoomUsers] = useState([]);
   const socketRef = useRef(null);
   const roomId = [authUser?._id, targetUserId].sort().join("-");
+  const peerRef = useRef(null); // PeerJS instance
+  const [callActive, setCallActive] = useState(false);
+  const [localStream, setLocalStream] = useState(null);
+  const [remoteStream, setRemoteStream] = useState(null);
+  const [isCaller, setIsCaller] = useState(false);
 
   useEffect(() => {
     if (!authUser || !targetUserId) return;
@@ -103,21 +108,126 @@ const ChatPage = () => {
     setInput("");
   };
 
-  const handleVideoCall = () => {
-    // For demo: just send a message with a call link
-    const callUrl = `${window.location.origin}/call/${roomId}`;
-    const msg = {
-      roomId,
-      message: `I've started a video call. Join me here: ${callUrl}`,
-      user: {
-        _id: authUser._id,
-        name: authUser.fullName,
-        profilePic: authUser.profilePic,
-      },
-    };
-    socketRef.current.emit("chat-message", msg);
-    setMessages((prev) => [...prev, { ...msg, self: true }]);
-    toast.success("Video call link sent successfully!");
+  const initializePeer = useCallback(() => {
+    if (peerRef.current) return;  // Only initialize once per session
+    const peer = new Peer();
+    peerRef.current = peer;
+
+    peer.on("open", (id) => {
+      console.log("Peer connected with ID:", id);
+      // When the peer connection opens, let the server know it's ready for calls.
+      socketRef.current.emit("peer-ready", { roomId, peerId: id });
+    });
+
+    peer.on("call", (call) => {
+      console.log("Received a call:", call);
+      navigator.mediaDevices
+        .getUserMedia({ video: true, audio: true })
+        .then((stream) => {
+          setLocalStream(stream);
+          call.answer(stream); // Answer the call with our stream
+          setCallActive(true);
+          setIsCaller(false);
+          call.on("stream", (remoteStream) => {
+            console.log("Received remote stream:", remoteStream);
+            setRemoteStream(remoteStream);
+          });
+        })
+        .catch((err) => {
+          console.error("Failed to get user media:", err);
+          toast.error("Failed to access camera/microphone.");
+        });
+      call.on("close", () => {
+        console.log("Call ended.");
+        setCallActive(false);
+        setLocalStream(null);
+        setRemoteStream(null);
+        setIsCaller(false);
+      });
+    });
+
+    peer.on("error", (err) => {
+      console.error("PeerJS error:", err);
+      toast.error("Video call error: " + err.message);
+      setCallActive(false);
+      setLocalStream(null);
+      setRemoteStream(null);
+      setIsCaller(false);
+    });
+
+    return () => {
+      if (peerRef.current) {
+        peerRef.current.destroy();
+      }
+    }
+  }, []);
+
+
+
+  useEffect(() => {
+    if (socketRef.current && socketRef.current.connected) {
+      initializePeer();
+      socketRef.current.on("start-call", ({ peerId }) => {
+        handleVideoCall(peerId);
+      });
+    }
+  }, [socketRef, initializePeer]);
+
+  useEffect(() => {
+    if (callActive && localStream) {
+        // Display local stream, for example:
+        const videoElement = document.getElementById('localVideo');
+        if (videoElement) {
+          videoElement.srcObject = localStream;
+        }
+    }
+  }, [callActive, localStream]);
+
+  useEffect(() => {
+    if (callActive && remoteStream) {
+        // Display remote stream
+        const videoElement = document.getElementById('remoteVideo');
+        if (videoElement) {
+          videoElement.srcObject = remoteStream;
+        }
+    }
+  }, [callActive, remoteStream]);
+
+
+  const handleVideoCall = async (peerId) => {
+    if (callActive) {
+      toast.error("A call is already in progress.");
+      return;
+    }
+
+    if (!peerRef.current || !peerRef.current.open) {
+      toast.error("Peer connection not ready.");
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      setLocalStream(stream);
+      const call = peerRef.current.call(peerId, stream);
+      console.log("Initiating call to peer:", peerId);
+      setCallActive(true);
+      setIsCaller(true);
+
+      call.on("stream", (remoteStream) => {
+        console.log("Received remote stream:", remoteStream);
+        setRemoteStream(remoteStream);
+      });
+
+      call.on("close", () => {
+        console.log("Call ended.");
+        setCallActive(false);
+        setLocalStream(null);
+        setRemoteStream(null);
+      });
+    } catch (err) {
+      console.error("Error starting call:", err);
+      toast.error("Failed to start video call: " + err.message);
+    }
   };
 
   if (loading) return <ChatLoader />;
@@ -129,7 +239,19 @@ const ChatPage = () => {
         Users in room: {roomUsers.length > 0 ? roomUsers.length : 1}
       </div>
       {/* Only show CallButton if room is private (2 users) */}
-      {roomUsers.length === 1 && <CallButton handleVideoCall={handleVideoCall} />}
+      {roomUsers.length === 1 && !callActive && (
+        <CallButton handleVideoCall={() => socketRef.current.emit("start-call", { roomId, targetPeerId: peerRef.current.id })} />
+      )}
+      {callActive && (
+        <div className="flex justify-center items-center">
+          <div className="p-4">
+            <video id="localVideo" muted autoPlay className="w-64 h-48 bg-black"></video>
+          </div>
+          <div className="p-4">
+            <video id="remoteVideo" autoPlay className="w-64 h-48 bg-black"></video>
+          </div>
+        </div>
+      )}
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
         {messages.map((msg, idx) => (
           <div

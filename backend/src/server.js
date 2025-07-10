@@ -41,13 +41,7 @@ app.use(cookieParser());
 app.use("/api/auth", authRoutes);
 app.use("/api/users", userRoutes);
 
-if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../frontend/dist")));
-
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "../frontend", "dist", "index.html"));
-  });
-}
+app.use(express.static(path.join(__dirname, "public")));
 
 
 // --- SOCKET.IO EVENTS ---
@@ -72,6 +66,13 @@ io.on("connection", (socket) => {
     socket.to(roomId).emit("user-joined", userId);
   });
 
+  socket.on("get-room-users", (roomId) => {
+    const room = io.sockets.adapter.rooms.get(roomId);
+    if (room) {
+      io.to(roomId).emit("room-users", Array.from(room));
+    }
+  });
+
   // Allow user in room (admin/creator action, call this before join-room)
   // Expects: { roomId, userId }
   socket.on("allow-user-in-room", async ({ roomId, userId }) => {
@@ -84,21 +85,23 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("chat-message", { message, user, socketId: socket.id });
   });
 
-  // WebRTC signaling
-  socket.on("webrtc-offer", (data) => {
-    socket.to(data.roomId).emit("webrtc-offer", data);
-  });
-  socket.on("webrtc-answer", (data) => {
-    socket.to(data.roomId).emit("webrtc-answer", data);
-  });
-  socket.on("webrtc-ice-candidate", (data) => {
-    socket.to(data.roomId).emit("webrtc-ice-candidate", data);
+   socket.on("peer-ready", ({ roomId, peerId }) => {
+    socket.peerId = peerId;  // Associate peerId with the socket
+    console.log(`Peer ${peerId} is ready in room ${roomId}`);
   });
 
-  socket.on("disconnect", () => {
-    console.log("User disconnected: " + socket.id);
+  socket.on("start-call", ({ roomId, targetPeerId }) => {
+      // Find the socket associated with the targetPeerId and emit to them.
+      for (let [id, sock] of io.sockets.sockets) {
+        if (sock.peerId === targetPeerId) {
+          io.to(id).emit("start-call", { peerId: socket.peerId });  // Send caller's peerId
+          break;
+        }
+      }
   });
 });
+
+
 
 server.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);

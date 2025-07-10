@@ -39,10 +39,23 @@ export async function allowUserInRoom(roomId, userId) {
   const user = await User.findById(userId);
   const userFriends = user.friends.map((id) => id.toString());
 
-  // Check if user is friends with at least one member
-  const isFriendWithSomeone = otherUserIds.some((otherId) => userFriends.includes(otherId));
-  if (!isFriendWithSomeone) {
-    throw new Error("You must be friends with at least one member to join this room.");
+  // 1:1 room: both users must be friends
+  if (otherUserIds.length === 1) {
+    const otherUserId = otherUserIds[0];
+    if (!userFriends.includes(otherUserId)) {
+      throw new Error("You must be friends with the other user to join this room.");
+    }
+  }
+  // Group room: user must be friends with all existing members.
+  else if (otherUserIds.length > 1) {
+    const areFriendsWithAll = otherUserIds.every((otherId) =>
+      userFriends.includes(otherId)
+    );
+    if (!areFriendsWithAll) {
+      throw new Error(
+        "You must be friends with all existing members to join this group room."
+      );
+    }
   }
 
   // All checks passed, allow user in room
