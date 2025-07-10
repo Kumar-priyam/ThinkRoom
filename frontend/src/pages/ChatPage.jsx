@@ -1,4 +1,3 @@
-
 import { useEffect, useState, useRef } from "react";
 import { useParams } from "react-router";
 import useAuthUser from "../hooks/useAuthUser";
@@ -16,6 +15,7 @@ const ChatPage = () => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(true);
+  const [roomUsers, setRoomUsers] = useState([]);
   const socketRef = useRef(null);
   const roomId = [authUser?._id, targetUserId].sort().join("-");
 
@@ -61,8 +61,21 @@ const ChatPage = () => {
       setMessages((prev) => [...prev, msg]);
     });
 
+
+    // Listen for user-joined and update room users
     socket.on("user-joined", (userId) => {
       toast.success(`User joined: ${userId}`);
+      setRoomUsers((prev) => (prev.includes(userId) ? prev : [...prev, userId]));
+    });
+
+    // Listen for initial user list (optional, if backend emits it)
+    socket.on("room-users", (users) => {
+      setRoomUsers(users);
+    });
+
+    // On connect, request current room users (optional, if backend supports)
+    socket.on("connect", () => {
+      socket.emit("get-room-users", { roomId });
     });
 
     setLoading(false);
@@ -111,7 +124,12 @@ const ChatPage = () => {
 
   return (
     <div className="h-[93vh] flex flex-col">
-      <CallButton handleVideoCall={handleVideoCall} />
+      {/* Show number of users in the room */}
+      <div className="p-2 text-sm text-right text-gray-500">
+        Users in room: {roomUsers.length > 0 ? roomUsers.length : 1}
+      </div>
+      {/* Only show CallButton if room is private (2 users) */}
+      {roomUsers.length === 1 && <CallButton handleVideoCall={handleVideoCall} />}
       <div className="flex-1 overflow-y-auto p-4 space-y-2">
         {messages.map((msg, idx) => (
           <div
