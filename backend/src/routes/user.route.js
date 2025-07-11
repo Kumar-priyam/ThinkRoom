@@ -6,6 +6,7 @@ import {
   getMyFriends,
   getOutgoingFriendReqs,
   getRecommendedUsers,
+  searchUsers,
   sendFriendRequest,
 } from "../controllers/user.controller.js";
 
@@ -13,6 +14,8 @@ const router = express.Router();
 
 // apply auth middleware to all routes
 router.use(protectRoute);
+
+router.get("/search", searchUsers);
 
 router.get("/", getRecommendedUsers);
 router.get("/friends", getMyFriends);

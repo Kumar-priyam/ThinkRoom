@@ -20,6 +20,70 @@ export async function getRecommendedUsers(req, res) {
   }
 }
 
+export async function searchUsers(req, res) {
+  try {
+    const { query } = req.query;
+    const currentUserId = req.user.id;
+
+    if (!query) {
+      return res.json([]);
+    }
+
+    // Find users matching the query, excluding the current user
+    const users = await User.find({
+      $and: [
+        { _id: { $ne: currentUserId } },
+        {
+          $or: [
+            { fullName: { $regex: query, $options: "i" } },
+            { technologiesInterestedIn: { $regex: query, $options: "i" } },
+          ],
+        },
+      ],
+    }).select("-password");
+
+    if (!users.length) {
+      return res.json([]);
+    }
+
+    // Get the current user's friends to filter them out
+    const currentUser = await User.findById(currentUserId).select("friends").lean();
+    const friendIds = new Set(currentUser.friends.map((f) => f.toString()));
+
+    // Find all relevant friend requests to determine pending status
+    const userIds = users.map((u) => u._id);
+    const friendRequests = await FriendRequest.find({
+      $or: [
+        { sender: currentUserId, recipient: { $in: userIds } },
+        { recipient: currentUserId, sender: { $in: userIds } },
+      ],
+      status: "pending",
+    }).lean();
+
+    // Augment user data with friendship status
+    const usersWithStatus = users
+      .filter((user) => !friendIds.has(user._id.toString())) // Exclude existing friends
+      .map((user) => {
+        const userObj = user.toObject();
+        const userIdStr = userObj._id.toString();
+
+        if (friendRequests.some((req) => req.sender.toString() === currentUserId && req.recipient.toString() === userIdStr)) {
+          userObj.friendshipStatus = "request_sent";
+        } else if (friendRequests.some((req) => req.recipient.toString() === currentUserId && req.sender.toString() === userIdStr)) {
+          userObj.friendshipStatus = "request_received";
+        } else {
+          userObj.friendshipStatus = "not_friends";
+        }
+        return userObj;
+      });
+
+    res.json(usersWithStatus);
+  } catch (error) {
+    console.error("Error in searchUsers controller:", error.message);
+    res.status(500).json({ message: "Internal Server Error" });
+  }
+}
+
 export async function getMyFriends(req, res) {
   try {
 

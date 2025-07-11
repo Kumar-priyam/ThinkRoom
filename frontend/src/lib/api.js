@@ -59,3 +59,7 @@ export async function acceptFriendRequest(requestId) {
   return response.data;
 }
 
+export async function searchUsers(query) {
+  const response = await axiosInstance.get(`/users/search?query=${query}`);
+  return response.data;
+}

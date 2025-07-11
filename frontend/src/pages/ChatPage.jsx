@@ -9,6 +9,13 @@ import CallButton from "../components/CallButton";
 import Peer from "peerjs";
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
 
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+  ],
+};
+
 const ChatPage = () => {
   const { id: targetUserId } = useParams();
   const { authUser } = useAuthUser();
@@ -24,6 +31,7 @@ const ChatPage = () => {
   const [remoteStream, setRemoteStream] = useState(null);
   const [isCaller, setIsCaller] = useState(false);
   const [activeCall, setActiveCall] = useState(null);
+  const localStreamRef = useRef(null); // Use a ref to hold the stream for cleanup
   const [audioMuted, setAudioMuted] = useState(false);
   const [videoMuted, setVideoMuted] = useState(false);
 
@@ -127,12 +135,18 @@ const ChatPage = () => {
         .getUserMedia({ video: true, audio: true })
         .then((stream) => {
           setLocalStream(stream);
+          localStreamRef.current = stream; // Also store the stream in a ref
           call.answer(stream); // Answer the call with our stream
           setCallActive(true);
           setIsCaller(false);
           call.on("stream", (remoteStream) => {
             console.log("Received remote stream:", remoteStream);
             setRemoteStream(remoteStream);
+          });
+          // When the other user hangs up, clean up the call on our end
+          call.on("close", () => {
+            console.log("The call was closed by the other user.");
+            cleanupCall();
           });
         })
         .catch((err) => {
@@ -149,17 +163,12 @@ const ChatPage = () => {
       setRemoteStream(null);
       setIsCaller(false);
     });
-
-    return () => {
-      if (peerRef.current) {
-        peerRef.current.destroy();
-      }
-    }
-  }, [authUser, roomId]);
+  }, [authUser, roomId, cleanupCall]);
 
   const cleanupCall = useCallback(() => {
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null; // Clear the ref
     }
     const localVideo = document.getElementById('localVideo');
     if (localVideo) localVideo.srcObject = null;
@@ -174,7 +183,7 @@ const ChatPage = () => {
     setVideoMuted(false);
     setActiveCall(null);
     console.log("Call cleaned up.");
-  }, [localStream]);
+  }, []); // Now this function is stable and has no dependencies
 
   const handleHangUp = useCallback(() => {
     if (activeCall) {
@@ -201,7 +210,7 @@ const ChatPage = () => {
     }
   }, [localStream]);
 
-  const handleVideoCall = useCallback(async (peerId) => {
+  const initiateCall = useCallback(async (peerId) => {
     if (callActive) {
       toast.error("A call is already in progress.");
       return;
@@ -215,6 +224,7 @@ const ChatPage = () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       setLocalStream(stream);
+      localStreamRef.current = stream; // Also store the stream in a ref
       const call = peerRef.current.call(peerId, stream);
       setActiveCall(call);
       console.log("Initiating call to peer:", peerId);
@@ -239,18 +249,14 @@ const ChatPage = () => {
   useEffect(() => {
     if (socketRef.current && authUser) {
       initializePeer();
+    }
 
-      const handleIncomingCall = ({ peerId }) => {
-        handleVideoCall(peerId);
-      };
-
-      socketRef.current.on("start-call", handleIncomingCall);
-
-      return () => {
-        socketRef.current?.off("start-call", handleIncomingCall);
+    return () => {
+      if (peerRef.current) {
+        peerRef.current.destroy();
       }
     }
-  }, [authUser, initializePeer, handleVideoCall]);
+  }, [authUser, initializePeer]);
 
   useEffect(() => {
     if (callActive && localStream) {
@@ -276,7 +282,7 @@ const ChatPage = () => {
       </div>
       {/* Only show CallButton if room is private (2 users) */}
       {!callActive && roomUsers.length === 1 && roomUsers[0].peerId && (
-        <CallButton handleVideoCall={() => socketRef.current.emit("start-call", { roomId, targetPeerId: roomUsers[0].peerId })} />
+        <CallButton handleVideoCall={() => initiateCall(roomUsers[0].peerId)} />
       )}
       {callActive && (
         <>

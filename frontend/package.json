@@ -12,6 +12,7 @@
   "dependencies": {
     "@tanstack/react-query": "^5.74.4",
     "axios": "^1.8.4",
+    "lodash.debounce": "^4.0.8",
     "lucide-react": "^0.503.0",
     "peerjs": "^1.5.5",
     "react": "^19.0.0",
